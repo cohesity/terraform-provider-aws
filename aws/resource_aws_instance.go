@@ -496,6 +496,12 @@ func resourceAwsInstance() *schema.Resource {
 					},
 				},
 			},
+
+			// Flag to enable status checks after ec2 instance is powered on.
+			"enable_status_checks": {
+				Type:     schema.TypeBool,
+				Optional: true,
+			},
 		},
 	}
 }
@@ -636,6 +642,29 @@ func resourceAwsInstanceCreate(d *schema.ResourceData, meta interface{}) error {
 		return fmt.Errorf(
 			"Error waiting for instance (%s) to become ready: %s",
 			*instance.InstanceId, err)
+	}
+
+	log.Printf(
+		"[DEBUG] Waiting for instance (%s) status to report ok",
+		*instance.InstanceId)
+
+	if _, ok := d.GetOk("enable_status_checks"); ok {
+		log.Printf("[INFO] enable_status_checks is true. Performing status checks.")
+		statusConf := &resource.StateChangeConf{
+			Pending:    []string{"initializing", "insufficient-data", "not-applicable"},
+			Target:     []string{"ok"},
+			Refresh:    InstanceStatusRefreshFunc(conn, *instance.InstanceId, []string{"impaired"}),
+			Timeout:    d.Timeout(schema.TimeoutCreate),
+			Delay:      10 * time.Second,
+			MinTimeout: 3 * time.Second,
+		}
+
+		_, err = statusConf.WaitForState()
+		if err != nil {
+			return fmt.Errorf(
+				"Error waiting for instance status (%s) to become ok: %s",
+				*instance.InstanceId, err)
+		}
 	}
 
 	instance = instanceRaw.(*ec2.Instance)
@@ -1203,6 +1232,62 @@ func resourceAwsInstanceDelete(d *schema.ResourceData, meta interface{}) error {
 
 	err := awsTerminateInstance(conn, d.Id(), d.Timeout(schema.TimeoutDelete))
 	return err
+}
+
+func InstanceStatusRefreshFunc(conn *ec2.EC2, instanceID string, failStates []string) resource.StateRefreshFunc {
+	return func() (interface{}, string, error) {
+		resp, err := conn.DescribeInstanceStatus(&ec2.DescribeInstanceStatusInput{
+			InstanceIds: []*string{aws.String(instanceID)},
+		})
+		if err != nil {
+			if ec2err, ok := err.(awserr.Error); ok && ec2err.Code() == "InvalidInstanceID.NotFound" {
+				// Set this to nil as if we didn't find anything.
+				resp = nil
+			} else {
+				log.Printf("Error on InstanceStatusRefresh: %s", err)
+				return nil, "", err
+			}
+		}
+
+		if resp == nil || len(resp.InstanceStatuses) == 0 {
+			// Sometimes AWS just has consistency issues and doesn't see
+			// our instance yet. Return an empty state.
+			return nil, "", nil
+		}
+
+		iStatus := resp.InstanceStatuses[0]
+
+		if iStatus.InstanceStatus == nil || iStatus.SystemStatus == nil {
+			log.Printf("[INFO] InstanceStatus or SystemStatus is empty")
+			return nil, "", nil
+		}
+
+		if *iStatus.InstanceStatus.Status == "ok" && *iStatus.SystemStatus.Status == "ok" {
+			log.Printf("[INFO] Status check ok.")
+			return iStatus, "ok", nil
+		}
+
+		for _, failState := range failStates {
+			if *iStatus.InstanceStatus.Status == failState {
+				return iStatus, failState, fmt.Errorf("Instance status check for instanceID [%s] failed.", instanceID)
+			}
+
+			if *iStatus.SystemStatus.Status == failState {
+				return iStatus, failState, fmt.Errorf("System status check for instanceID [%s] failed.", instanceID)
+			}
+		}
+
+		log.Printf("[INFO] Instance Status: [%s], System Status: [%s]", *iStatus.InstanceStatus.Status, *iStatus.SystemStatus.Status)
+		if *iStatus.InstanceStatus.Status != *iStatus.SystemStatus.Status {
+			if *iStatus.InstanceStatus.Status == "ok" {
+				return iStatus, *iStatus.SystemStatus.Status, nil
+			}
+			return iStatus, *iStatus.InstanceStatus.Status, nil
+		}
+
+		log.Printf("Both statuses are same.")
+		return iStatus, *iStatus.InstanceStatus.Status, nil
+	}
 }
 
 // InstanceStateRefreshFunc returns a resource.StateRefreshFunc that is used to watch
