@@ -748,7 +748,7 @@ func resourceAwsKinesisAnalyticsApplicationUpdate(d *schema.ResourceData, meta i
 				addOpts := &kinesisanalytics.AddApplicationInputInput{
 					ApplicationName:             aws.String(name),
 					CurrentApplicationVersionId: aws.Int64(int64(version)),
-					Input:                       input,
+					Input: input,
 				}
 				// Retry for IAM eventual consistency
 				err := resource.Retry(1*time.Minute, func() *resource.RetryError {
@@ -784,7 +784,7 @@ func resourceAwsKinesisAnalyticsApplicationUpdate(d *schema.ResourceData, meta i
 				addOpts := &kinesisanalytics.AddApplicationOutputInput{
 					ApplicationName:             aws.String(name),
 					CurrentApplicationVersionId: aws.Int64(int64(version)),
-					Output:                      output,
+					Output: output,
 				}
 				// Retry for IAM eventual consistency
 				err := resource.Retry(1*time.Minute, func() *resource.RetryError {
